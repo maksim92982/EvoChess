@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Pro Chess Evolution</title>
+<style>
+:root { --sq-size: min(11vw, 60px); }
+* { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; touch-action: none; }
+body {
+font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+background: #262421;
+color: #bababa;
+display: flex;
+flex-direction: column;
+align-items: center;
+justify-content: center;
+height: 100vh;
+overflow: hidden;
+}
+
+/* UI Elements */
+.header { text-align: center; margin-bottom: 10px; z-index: 10; }
+h1 { font-size: 1.2rem; color: #fff; margin-bottom: 4px; }
+#status { font-size: 0.9rem; color: #888; height: 1.2em; }
+#log { font-size: 0.85rem; color: #e0a834; height: 1.2em; margin-top: 2px; font-weight: bold;}
+
+/* Board */
+#board-wrapper {
+position: relative;
+width: calc(var(--sq-size) * 8);
+height: calc(var(--sq-size) * 8);
+border: 2px solid #111;
+box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+}
+
+.game-area { display: flex; gap: 10px; align-items: stretch; }
+.eval-panel {
+width: 32px;
+height: calc(var(--sq-size) * 8);
+display: flex;
+flex-direction: column;
+align-items: center;
+gap: 4px;
+}
+#material-score { height: 18px; font: bold 13px monospace; color: #f0d9b5; }
+#eval-bar {
+width: 18px;
+flex: 1;
+position: relative;
+overflow: hidden;
+background: #222;
+border: 1px solid #111;
+border-radius: 3px;
+}
+#eval-white {
+position: absolute;
+left: 0;
+right: 0;
+bottom: 0;
+height: 50%;
+background: #f0d9b5;
+transition: height 0.2s ease;
+}
+
+#board {
+display: grid;
+grid-template-columns: repeat(8, 1fr);
+width: 100%;
+height: 100%;
+}
+
+.square {
+width: var(--sq-size);
+height: var(--sq-size);
+position: relative;
+}
+.light { background-color: #f0d9b5; }
+.dark { background-color: #b58863; }
+
+/* Highlights */
+.highlight-move { background-color: rgba(255, 255, 0, 0.4) !important; }
+.highlight-capture { background-color: rgba(255, 0, 0, 0.4) !important; }
+.last-move { background-color: rgba(155, 199, 0, 0.41) !important; }
+.check-sq { background: radial-gradient(circle, rgba(255,0,0,0.8) 20%, transparent 80%); }
+
+/* Pieces */
+.piece {
+width: 100%;
+height: 100%;
+background-size: 90% 90%;
+background-position: center;
+background-repeat: no-repeat;
+cursor: grab;
+z-index: 2;
+transition: transform 0.1s;
+}
+.piece:active { cursor: grabbing; }
+
+/* Dragging Ghost */
+#drag-ghost {
+position: fixed;
+width: var(--sq-size);
+height: var(--sq-size);
+pointer-events: none;
+z-index: 1000;
+display: none;
+background-size: 90% 90%;
+background-repeat: no-repeat;
+background-position: center;
+transform: translate(-50%, -50%) scale(1.2);
+filter: drop-shadow(0 10px 20px rgba(0,0,0,0.5));
+}
+
+/* Level Badge */
+.lvl-badge {
+position: absolute;
+bottom: 2px; right: 2px;
+background: rgba(0,0,0,0.8);
+color: #fff;
+font-size: 9px;
+padding: 1px 3px;
+border-radius: 3px;
+z-index: 5;
+font-family: monospace;
+}
+.evolved-glow { filter: drop-shadow(0 0 4px gold); }
+
+/* Controls */
+.controls { margin-top: 15px; display: flex; gap: 10px; }
+button {
+background: #363533; color: #bababa; border: none;
+padding: 8px 16px; border-radius: 4px; font-size: 14px; cursor: pointer;
+}
+button:hover { background: #454442; }
+button:disabled { cursor: default; opacity: 0.45; }
+.thinking { color: #e0a834 !important; animation: pulse 1s infinite; }
+@keyframes pulse { 0%{opacity:1} 50%{opacity:0.5} 100%{opacity:1} }
+</style>
+</head>
+<body>
+
+<div class="header">
+<h1>♟ Шахматы Pro + Эволюция</h1>
+<div id="status">Загрузка движка...</div>
+<div id="log"></div>
+</div>
+
+<div class="game-area">
+<div id="board-wrapper">
+<div id="board"></div>
+</div>
+<div class="eval-panel" aria-label="Материальный перевес">
+<div id="material-score">0</div>
+<div id="eval-bar"><div id="eval-white"></div></div>
+</div>
+</div>
+<div id="drag-ghost"></div>
+
+<div class="controls">
+<button onclick="resetGame()">Новая игра</button>
+<button id="history-back" onclick="goBack()" disabled>← Назад</button>
+<button id="history-forward" onclick="goForward()" disabled>Вперёд →</button>
+<button onclick="toggleEngine()">Вкл/Выкл ИИ</button>
+</div>
+
+<!-- Load Stockfish -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+<script>
+// --- CONFIG & ASSETS ---
+const PIECES_SVG = {
+w: { p:'♙', n:'♘', b:'♗', r:'♖', q:'♕', k:'♔' }, // Fallback logic if URLs fail, but we use URLs below
+b: { p:'♟', n:'♞', b:'♝', r:'♜', q:'♛', k:'♚' }
+};
+// Lichess SVG URLs
+const SVG_URLS = {
+w: { p:'https://upload.wikimedia.org/wikipedia/commons/4/45/Chess_plt45.svg', n:'https://upload.wikimedia.org/wikipedia/commons/7/70/Chess_nlt45.svg', b:'https://upload.wikimedia.org/wikipedia/commons/b/b1/Chess_blt45.svg', r:'https://upload.wikimedia.org/wikipedia/commons/7/72/Chess_rlt45.svg', q:'https://upload.wikimedia.org/wikipedia/commons/1/15/Chess_qlt45.svg', k:'https://upload.wikimedia.org/wikipedia/commons/4/42/Chess_klt45.svg' },
+b: { p:'https://upload.wikimedia.org/wikipedia/commons/c/c7/Chess_pdt45.svg', n:'https://upload.wikimedia.org/wikipedia/commons/e/ef/Chess_ndt45.svg', b:'https://upload.wikimedia.org/wikipedia/commons/9/98/Chess_bdt45.svg', r:'https://upload.wikimedia.org/wikipedia/commons/f/ff/Chess_rdt45.svg', q:'https://upload.wikimedia.org/wikipedia/commons/4/47/Chess_qdt45.svg', k:'https://upload.wikimedia.org/wikipedia/commons/f/f0/Chess_kdt45.svg' }
+};
+
+const TYPE_NAMES = { p:'Пешка', n:'Конь', b:'Слон', r:'Ладья', q:'Ферзь', k:'Король' };
+const LEVEL_MAP = { 1:'p', 2:'n', 3:'b', 4:'r', 5:'q' };
+const PIECE_MATERIAL_VALUES = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
+
+// --- STATE ---
+let game = new Chess(); // Logic for standard rules (castling, en passant)
+let customState = {}; // Our custom state: { "a1": {level: 4, evolved: true}, ... }
+let boardEl = document.getElementById('board');
+let statusEl = document.getElementById('status');
+let logEl = document.getElementById('log');
+let dragGhost = document.getElementById('drag-ghost');
+let materialScoreEl = document.getElementById('material-score');
+let evalWhiteEl = document.getElementById('eval-white');
+let historyBackEl = document.getElementById('history-back');
+let historyForwardEl = document.getElementById('history-forward');
+
+let isEngineOn = true;
+let engineReady = false;
+let playerColor = 'w';
+
+// Drag State
+let draggingPiece = null;
+let dragStartSquare = null;
+let legalMovesForDrag = [];
+let lastMove = null;
+let moveCount = 0;
+let positionHistory = [];
+let historyIndex = 0;
+
+// --- STOCKFISH SETUP ---
+let stockfish = null;
+let engineThinking = false;
+let searchFen = null;
+let engineLoadTimer = null;
+
+function loadEngine() {
+let workerUrl = null;
+try {
+// A Blob worker can import the CDN script even when this page is opened via file://.
+const sfUrl = 'https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.0/stockfish.js';
+workerUrl = URL.createObjectURL(new Blob([
+`importScripts(${JSON.stringify(sfUrl)});`
+], { type: 'text/javascript' }));
+stockfish = new Worker(workerUrl);
+stockfish.onerror = engineFailed;
+engineLoadTimer = setTimeout(() => engineFailed(new Error('Stockfish loading timed out')), 30000);
+
+stockfish.onmessage = function(event) {
+const line = event.data;
+if (line === 'uciok') {
+stockfish.postMessage('isready');
+}
+if (line === 'readyok') {
+clearTimeout(engineLoadTimer);
+engineReady = true;
+updateStatus(isEngineOn ? "Движок готов. Ваш ход." : "ИИ выключен (PvP)");
+requestEngineMove();
+}
+if (line.startsWith('bestmove ') && engineThinking) {
+const isCurrentPosition = searchFen === game.fen();
+engineThinking = false;
+searchFen = null;
+statusEl.classList.remove('thinking');
+if (!isCurrentPosition || !isEngineOn || game.turn() === playerColor || game.game_over()) {
+requestEngineMove();
+return;
+}
+const moveStr = line.split(' ')[1];
+if (/^[a-h][1-8][a-h][1-8][qrbn]?$/.test(moveStr)) {
+makeMove(moveStr.substring(0,2), moveStr.substring(2,4), moveStr[4] || 'q');
+}
+}
+};
+stockfish.postMessage('uci');
+} catch(e) {
+engineFailed(e);
+} finally {
+if (workerUrl) URL.revokeObjectURL(workerUrl);
+}
+}
+
+function engineFailed(error) {
+console.error("Stockfish load failed", error);
+clearTimeout(engineLoadTimer);
+if (stockfish) stockfish.terminate();
+stockfish = null;
+engineReady = false;
+engineThinking = false;
+searchFen = null;
+isEngineOn = false;
+statusEl.classList.remove('thinking');
+updateStatus("ИИ недоступен. Режим на двоих.");
+}
+
+function stopEngineSearch() {
+searchFen = null;
+if (stockfish && engineThinking) stockfish.postMessage('stop');
+statusEl.classList.remove('thinking');
+}
+
+function requestEngineMove() {
+if (!isEngineOn || isViewingHistory() || game.game_over() || game.turn() === playerColor) return;
+if (!engineReady || !stockfish) {
+updateStatus("Загрузка движка...");
+return;
+}
+updateStatus("Думает...");
+statusEl.classList.add('thinking');
+if (engineThinking) return;
+searchFen = game.fen();
+engineThinking = true;
+stockfish.postMessage('position fen ' + searchFen);
+stockfish.postMessage('go depth 12');
+}
+
+function toggleEngine() {
+isEngineOn = !isEngineOn;
+if (!isEngineOn) stopEngineSearch();
+if (isEngineOn && !stockfish) loadEngine();
+updateStatus(isEngineOn ? "ИИ включен" : "ИИ выключен (PvP)");
+requestEngineMove();
+}
+
+// --- INITIALIZATION ---
+function resetGame() {
+stopEngineSearch();
+if (stockfish && engineReady) stockfish.postMessage('ucinewgame');
+game.reset();
+customState = {};
+lastMove = null;
+moveCount = 0;
+positionHistory = [];
+historyIndex = 0;
+// Initialize custom state for all pieces
+syncCustomState();
+savePosition();
+renderBoard();
+updateStatus("Ваш ход (Белые)");
+logEl.textContent = "";
+}
+
+function syncCustomState() {
+// Map chess.js board to our custom state object
+const board = game.board();
+for(let r=0; r<8; r++) {
+for(let c=0; c<8; c++) {
+const piece = board[r][c];
+const sq = String.fromCharCode(97+c) + (8-r);
+if(piece) {
+if(!customState[sq]) {
+customState[sq] = { level: getLevel(piece.type), evolved: false };
+} else {
+// Ensure type matches level if reset
+if(customState[sq].level !== getLevel(piece.type)) {
+// Keep evolution if types match, else reset?
+// For simplicity, if piece exists, keep state unless it's a new promotion
+}
+}
+} else {
+delete customState[sq];
+}
+}
+}
+}
+
+function getLevel(type) {
+const map = { p:1, n:2, b:3, r:4, q:5, k:99 };
+return map[type] || 1;
+}
+
+function cloneCustomState(state) {
+return JSON.parse(JSON.stringify(state));
+}
+
+function isViewingHistory() {
+return historyIndex < positionHistory.length - 1;
+}
+
+function savePosition() {
+positionHistory.push({
+fen: game.fen(),
+customState: cloneCustomState(customState),
+lastMove: lastMove ? { ...lastMove } : null,
+moveCount
+});
+historyIndex = positionHistory.length - 1;
+updateHistoryControls();
+}
+
+function restorePosition(index) {
+const position = positionHistory[index];
+if(!position) return;
+
+game.load(position.fen);
+customState = cloneCustomState(position.customState);
+lastMove = position.lastMove ? { ...position.lastMove } : null;
+moveCount = position.moveCount;
+historyIndex = index;
+renderBoard();
+updateHistoryControls();
+
+if(isViewingHistory()) {
+statusEl.textContent = `Просмотр хода ${moveCount}. Вернитесь вперед, чтобы ходить.`;
+return;
+}
+
+updateStatus(game.turn() === 'w' ? "Ход белых" : "Ход черных");
+requestEngineMove();
+}
+
+function updateHistoryControls() {
+historyBackEl.disabled = historyIndex === 0;
+historyForwardEl.disabled = historyIndex === positionHistory.length - 1;
+}
+
+function goBack() {
+if(historyIndex === 0) return;
+
+stopEngineSearch();
+restorePosition(historyIndex - 1);
+}
+
+function goForward() {
+if(historyIndex === positionHistory.length - 1) return;
+
+restorePosition(historyIndex + 1);
+}
+
+function updateMaterialScore() {
+let materialDiff = 0;
+
+game.board().flat().forEach(piece => {
+if(!piece) return;
+
+const value = PIECE_MATERIAL_VALUES[piece.type];
+materialDiff += piece.color === 'w' ? value : -value;
+});
+
+const clampedDiff = Math.max(-10, Math.min(10, materialDiff));
+evalWhiteEl.style.height = `${50 + clampedDiff * 5}%`;
+materialScoreEl.textContent = materialDiff > 0 ? `+${materialDiff}` : String(materialDiff);
+materialScoreEl.style.color = materialDiff < 0 ? '#b58863' : '#f0d9b5';
+}
+
+function logBoardState(moveObj) {
+const pieces = [];
+const board = game.board();
+
+for(let rankIndex = 0; rankIndex < 8; rankIndex++) {
+for(let fileIndex = 0; fileIndex < 8; fileIndex++) {
+const piece = board[rankIndex][fileIndex];
+if(!piece) continue;
+
+const square = String.fromCharCode(97 + fileIndex) + (8 - rankIndex);
+const state = customState[square];
+pieces.push({
+square,
+color: piece.color === 'w' ? 'белая' : 'черная',
+type: piece.type,
+name: TYPE_NAMES[piece.type],
+level: state ? state.level : getLevel(piece.type),
+evolved: Boolean(state && state.evolved),
+stateType: state && state.type ? state.type : piece.type
+});
+}
+}
+
+const moveNumber = Math.ceil(moveCount / 2);
+const snapshot = {
+move: `${moveNumber}${moveObj.color === 'w' ? '.' : '...'}`,
+notation: moveObj.san,
+from: moveObj.from,
+to: moveObj.to,
+piece: TYPE_NAMES[moveObj.piece],
+captured: moveObj.captured ? TYPE_NAMES[moveObj.captured] : null,
+promotion: moveObj.promotion ? TYPE_NAMES[moveObj.promotion] : null,
+fen: game.fen(),
+pieces
+};
+
+console.info('[Chess board after move]', JSON.stringify(snapshot, null, 2));
+}
+
+// --- RENDERING ---
+function renderBoard() {
+boardEl.innerHTML = '';
+const board = game.board();
+updateMaterialScore();
+
+for(let r=0; r<8; r++) {
+for(let c=0; c<8; c++) {
+const sqName = String.fromCharCode(97+c) + (8-r);
+const piece = board[r][c];
+const isLight = (r+c)%2 === 0;
+
+const sqDiv = document.createElement('div');
+sqDiv.className = `square ${isLight ? 'light' : 'dark'}`;
+sqDiv.dataset.sq = sqName;
+
+// Highlight last move
+if(lastMove && (lastMove.from === sqName || lastMove.to === sqName)) {
+sqDiv.classList.add('last-move');
+}
+
+// Highlight check
+if(piece && piece.type === 'k' && piece.color === game.turn() && game.in_check()) {
+sqDiv.classList.add('check-sq');
+}
+
+if(piece) {
+const pDiv = document.createElement('div');
+pDiv.className = 'piece';
+pDiv.style.backgroundImage = `url('${SVG_URLS[piece.color][piece.type]}')`;
+
+// Custom Evolution Visuals
+const cs = customState[sqName];
+if(cs && cs.evolved) {
+pDiv.classList.add('evolved-glow');
+const badge = document.createElement('span');
+badge.className = 'lvl-badge';
+badge.textContent = PIECE_MATERIAL_VALUES[piece.type];
+sqDiv.appendChild(badge);
+}
+
+// Mouse/Touch Events for Dragging
+pDiv.addEventListener('mousedown', (e) => startDrag(e, sqName, piece));
+pDiv.addEventListener('touchstart', (e) => startDrag(e, sqName, piece), {passive: false});
+
+sqDiv.appendChild(pDiv);
+}
+
+boardEl.appendChild(sqDiv);
+}
+}
+}
+
+// --- DRAG AND DROP LOGIC ---
+function startDrag(e, square, piece) {
+if(isViewingHistory() || game.game_over() || (isEngineOn && piece.color !== playerColor)) return;
+
+e.preventDefault();
+draggingPiece = piece;
+dragStartSquare = square;
+
+// Get legal moves
+const moves = game.moves({square: square, verbose: true});
+legalMovesForDrag = moves.map(m => m.to);
+
+// Highlight moves
+highlightMoves(legalMovesForDrag);
+
+// Setup Ghost
+dragGhost.style.backgroundImage = `url('${SVG_URLS[piece.color][piece.type]}')`;
+dragGhost.style.display = 'block';
+moveGhost(e);
+
+// Hide original piece visually
+e.target.style.opacity = '0';
+
+document.addEventListener('mousemove', onDragMove);
+document.addEventListener('touchmove', onDragMove, {passive: false});
+document.addEventListener('mouseup', endDrag);
+document.addEventListener('touchend', endDrag);
+}
+
+function moveGhost(e) {
+const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+dragGhost.style.left = clientX + 'px';
+dragGhost.style.top = clientY + 'px';
+}
+
+function onDragMove(e) {
+e.preventDefault();
+moveGhost(e);
+}
+
+function endDrag(e) {
+document.removeEventListener('mousemove', onDragMove);
+document.removeEventListener('touchmove', onDragMove);
+document.removeEventListener('mouseup', endDrag);
+document.removeEventListener('touchend', endDrag);
+
+dragGhost.style.display = 'none';
+
+// Find drop target
+const clientX = e.changedTouches ? e.changedTouches[0].clientX : e.clientX;
+const clientY = e.changedTouches ? e.changedTouches[0].clientY : e.clientY;
+
+// Hide ghost temporarily to get element below
+const elemBelow = document.elementFromPoint(clientX, clientY);
+const squareDiv = elemBelow ? elemBelow.closest('.square') : null;
+
+let success = false;
+if(squareDiv) {
+const targetSq = squareDiv.dataset.sq;
+if(legalMovesForDrag.includes(targetSq)) {
+makeMove(dragStartSquare, targetSq);
+success = true;
+}
+}
+
+if(!success) {
+renderBoard(); // Snap back
+}
+
+draggingPiece = null;
+dragStartSquare = null;
+legalMovesForDrag = [];
+}
+
+function highlightMoves(moves) {
+moves.forEach(sq => {
+const el = document.querySelector(`.square[data-sq="${sq}"]`);
+if(el) {
+// Check if capture
+const pieceAtTarget = game.get(sq);
+if(pieceAtTarget) el.classList.add('highlight-capture');
+else el.classList.add('highlight-move');
+}
+});
+}
+
+// --- GAME LOGIC & EVOLUTION ---
+function makeMove(from, to, promotion = 'q') {
+const moveObj = game.move({ from: from, to: to, promotion: promotion });
+
+if(!moveObj) return;
+
+lastMove = { from: moveObj.from, to: moveObj.to };
+moveCount += 1;
+
+// --- CUSTOM EVOLUTION LOGIC ---
+const attackerSq = from;
+const victimSq = to;
+const capturedPiece = moveObj.captured; // 'p', 'n', etc. or undefined
+
+// Handle En Passant Capture logic for evolution
+let realCapture = capturedPiece;
+if(moveObj.flags.includes('e')) {
+realCapture = 'p'; // En passant always captures a pawn
+}
+
+// Update Custom State
+// 1. Move the state object
+let attackerState = customState[attackerSq] || { level: getLevel(moveObj.piece), evolved: false };
+delete customState[attackerSq];
+
+// 2. Handle Evolution
+let logMsg = "";
+if(realCapture && moveObj.piece !== 'k') {
+const victimLevel = getLevel(realCapture);
+const newLevel = Math.min(5, Math.max(attackerState.level, victimLevel + 1));
+
+if(newLevel > attackerState.level) {
+const newTypeChar = LEVEL_MAP[newLevel];
+// Replace the moved piece on its destination square with its evolved form.
+game.remove(victimSq);
+game.put({ type: newTypeChar, color: moveObj.color }, victimSq);
+game.load(game.fen());
+
+attackerState.type = newTypeChar;
+attackerState.level = newLevel;
+attackerState.evolved = true;
+
+logMsg = `${TYPE_NAMES[moveObj.piece]} эволюционировал в ${TYPE_NAMES[newTypeChar]}!`;
+}
+}
+
+// Handle Castling State Move (Rooks don't evolve usually, but need to move state)
+if(moveObj.flags.includes('k') || moveObj.flags.includes('q')) {
+// King side: H file rook moves to F file
+// Queen side: A file rook moves to D file
+// This is complex to sync perfectly with simple state map,
+// but since Rooks are lvl 4 and rarely evolve in castling, we skip deep state sync for rooks for now
+// or just clear their state to prevent bugs.
+}
+
+// Save state
+customState[victimSq] = attackerState;
+
+// Pawn Promotion override (if reached end without capture, standard promotion applies)
+if(moveObj.flags.includes('p') && !realCapture) {
+customState[victimSq] = { level: getLevel(moveObj.promotion), type: moveObj.promotion, evolved: true };
+logMsg = `Превращение пешки: ${TYPE_NAMES[moveObj.promotion]}`;
+}
+
+savePosition();
+renderBoard();
+if(logMsg) logEl.textContent = logMsg;
+logBoardState(moveObj);
+
+// Trigger AI
+if(isEngineOn && !game.game_over() && game.turn() !== playerColor) {
+requestEngineMove();
+} else {
+updateStatus(game.turn() === 'w' ? "Ход белых" : "Ход черных");
+}
+}
+
+function updateStatus(msg) {
+if(game.game_over()) {
+if(game.in_checkmate()) statusEl.textContent = "МАТ! Игра окончена.";
+else if(game.in_draw()) statusEl.textContent = "Ничья.";
+else statusEl.textContent = "Игра окончена.";
+return;
+}
+statusEl.textContent = msg;
+}
+
+// Start
+resetGame();
+loadEngine();
+
+</script>
+</body>
+</html>
